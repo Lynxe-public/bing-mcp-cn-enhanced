@@ -631,10 +631,9 @@ const server = new McpServer({
   version: "2.0.0"
 });
 
-// 注册必应搜索工具
+// Register Bing search tool
 server.tool(
   "bing_search",
-  "使用必应搜索指定的关键词，并返回搜索结果列表，包括标题、链接、摘要和ID",
   {
     query: z.string().describe("搜索关键词"),
     num_results: z.number().default(5).describe("返回的结果数量，默认为5")
@@ -666,10 +665,9 @@ server.tool(
   }
 );
 
-// 注册网页内容抓取工具
+// Register webpage content fetching tool
 server.tool(
   "fetch_webpage",
-  "根据提供的ID获取对应网页的内容",
   {
     result_id: z.string().describe("从bing_search返回的结果ID")
   },

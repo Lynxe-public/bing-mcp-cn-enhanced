@@ -49,7 +49,7 @@ npx bing-cn-mcp-enhanced
 ```json
 {
   "mcpServers": {
-    "bingcn": {
+    "EnhancedBing": {
       "command": "npx",
       "args": [
         "bing-cn-mcp-enhanced"
@@ -63,7 +63,7 @@ Windows用户的配置
 ```json
 {
   "mcpServers": {
-    "bingcnmcp": {
+    "EnhancedBing": {
         "command": "cmd",
         "args": [
           "/c",
@@ -88,7 +88,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
 ```json
 {
   "mcpServers": {
-    "bingcn": {
+    "EnhancedBing": {
       "command": "sh",
       "args": [
         "-c",
@@ -104,7 +104,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
 ```json
 {
   "mcpServers": {
-    "bingcn": {
+    "EnhancedBing": {
       "command": "sh",
       "args": [
         "-c",
@@ -118,7 +118,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
 
 {
   "mcpServers": {
-    "bingcn": {
+    "EnhancedBing": {
       "args": [
         "bing-cn-mcp-enhanced"
       ],
@@ -131,7 +131,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
 ```json
 {
   "mcpServers": {
-    "bingcn": {
+    "EnhancedBing": {
       "command": "sh",
       "args": [
         "-c",
