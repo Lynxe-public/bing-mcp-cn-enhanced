@@ -410,24 +410,54 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
     const url = result.link;
     console.error(`正在获取网页内容: ${url}`);
     
-    // 设置请求头，模拟浏览器
-    const headers = {
+    // Set request headers to mimic a real browser
+    const headers: Record<string, string> = {
       'User-Agent': USER_AGENT,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
-      'Referer': 'https://cn.bing.com/'
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'max-age=0',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Referer': 'https://cn.bing.com/',
+      'DNT': '1'
     };
     
-    // 发送请求获取网页内容
+    // Try to extract domain from URL for better Referer
+    try {
+      const urlObj = new URL(url);
+      headers['Referer'] = `${urlObj.protocol}//${urlObj.hostname}/`;
+    } catch (e) {
+      // Keep default Referer if URL parsing fails
+    }
+    
+    // Send request to fetch webpage content
+    // Add a small random delay to avoid being detected as a bot
+    const delay = Math.random() * 500 + 200; // 200-700ms delay
+    await new Promise(resolve => setTimeout(resolve, delay));
+    
     const response = await axios.get(url, { 
       headers,
-      timeout: 15000,
-      responseType: 'arraybuffer' // 使用arraybuffer以便正确处理各种编码
+      timeout: 20000,
+      responseType: 'arraybuffer', // Use arraybuffer to handle various encodings
+      maxRedirects: 5,
+      validateStatus: (status) => status < 500 // Don't throw on 4xx errors, we'll handle them
     });
     
-    console.error(`获取网页响应状态: ${response.status}`);
+    console.error(`Webpage response status: ${response.status}`);
+    
+    // Handle 403 and other client errors
+    if (response.status === 403) {
+      throw new Error(`获取网页内容失败: 网站拒绝了访问请求 (403 Forbidden). 这可能是因为反爬虫机制。URL: ${url}`);
+    }
+    
+    if (response.status >= 400) {
+      throw new Error(`获取网页内容失败: HTTP ${response.status} 错误. URL: ${url}`);
+    }
     
     // 检测编码并正确解码内容
     let html = '';
@@ -520,10 +550,25 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
     console.error(`最终提取内容长度: ${content.length} 字符`);
     return content;
   } catch (error) {
-    console.error('获取网页内容出错:', error);
+    console.error('Error fetching webpage content:', error);
     if (axios.isAxiosError(error)) {
-      console.error(`HTTP错误状态码: ${error.response?.status}`);
-      console.error(`错误响应数据: ${error.response?.headers['content-type']}`);
+      const status = error.response?.status;
+      const statusText = error.response?.statusText;
+      const contentType = error.response?.headers['content-type'] || 'unknown';
+      
+      console.error(`HTTP error status: ${status}`);
+      console.error(`HTTP error status text: ${statusText}`);
+      console.error(`Error response content type: ${contentType}`);
+      
+      if (status === 403) {
+        throw new Error(`获取网页内容失败: 网站拒绝了访问请求 (403 Forbidden). 这可能是因为反爬虫机制。请稍后重试或尝试其他链接。`);
+      } else if (status === 404) {
+        throw new Error(`获取网页内容失败: 页面不存在 (404 Not Found)`);
+      } else if (status === 429) {
+        throw new Error(`获取网页内容失败: 请求过于频繁 (429 Too Many Requests). 请稍后重试。`);
+      } else if (status) {
+        throw new Error(`获取网页内容失败: HTTP ${status} ${statusText || ''}`);
+      }
     }
     throw new Error(`获取网页内容失败: ${error instanceof Error ? error.message : '未知错误'}`);
   }
