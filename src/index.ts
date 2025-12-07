@@ -90,7 +90,7 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
     
     for (const selector of resultSelectors) {
       console.error(`尝试选择器: ${selector}`);
-      $(selector).each((index: number, element: cheerio.Element) => {
+      $(selector).each((index: number, element: any) => {
         if (results.length >= numResults) return false;
         
         // Print element HTML for debugging
@@ -310,7 +310,7 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
       const linkContainers = $('#b_results a[href], #b_topw a[href], .b_algo a[href], .b_ans a[href]');
       console.error(`Found ${linkContainers.length} potential result links`);
       
-      linkContainers.each((index: number, element: cheerio.Element) => {
+      linkContainers.each((index: number, element: any) => {
         if (results.length >= numResults) return false;
         
         const $el = $(element);
@@ -529,14 +529,10 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
   }
 }
 
-// 创建 MCP 服务器实例
+// Create MCP server instance
 const server = new McpServer({
   name: "bing-search",
-  version: "1.0.0",
-  capabilities: {
-    resources: {},
-    tools: {}
-  }
+  version: "2.0.0"
 });
 
 // 注册必应搜索工具

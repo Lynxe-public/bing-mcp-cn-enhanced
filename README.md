@@ -16,13 +16,13 @@
 ### 全局安装
 
 ```bash
-npm install -g bing-cn-mcp
+npm install -g bing-cn-mcp-enhanced
 ```
 
 ### 或者直接通过 npx 运行
 
 ```bash
-npx bing-cn-mcp
+npx bing-cn-mcp-enhanced
 ```
 
 ## 使用方法
@@ -30,13 +30,13 @@ npx bing-cn-mcp
 ### 启动服务器
 
 ```bash
-bing-cn-mcp
+bing-cn-mcp-enhanced
 ```
 
 或者使用 npx：
 
 ```bash
-npx bing-cn-mcp
+npx bing-cn-mcp-enhanced
 ```
 
 ### 在支持 MCP 的环境中使用
@@ -52,7 +52,7 @@ npx bing-cn-mcp
     "bingcn": {
       "command": "npx",
       "args": [
-        "bing-cn-mcp"
+        "bing-cn-mcp-enhanced"
       ]
     }
   }
@@ -68,7 +68,7 @@ Windows用户的配置
         "args": [
           "/c",
           "npx",
-          "bing-cn-mcp"
+          "bing-cn-mcp-enhanced"
       ]
     }
   }
@@ -92,7 +92,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
       "command": "sh",
       "args": [
         "-c",
-        "npx bing-cn-mcp 2>> ~/.mcp-logs/bing-cn-mcp.log"
+        "npx bing-cn-mcp-enhanced 2>> ~/.mcp-logs/bing-cn-mcp-enhanced.log"
       ]
     }
   }
@@ -108,7 +108,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
       "command": "sh",
       "args": [
         "-c",
-        "npx bing-cn-mcp 2>&1 | tee -a ~/.mcp-logs/bing-cn-mcp.log >&2"
+        "npx bing-cn-mcp-enhanced 2>&1 | tee -a ~/.mcp-logs/bing-cn-mcp-enhanced.log >&2"
       ]
     }
   }
@@ -120,7 +120,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
   "mcpServers": {
     "bingcn": {
       "args": [
-        "bing-cn-mcp"
+        "bing-cn-mcp-enhanced"
       ],
       "command": "npx"
     }
@@ -135,7 +135,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
       "command": "sh",
       "args": [
         "-c",
-        "mkdir -p ~/.mcp-logs && npx bing-cn-mcp 2>> ~/.mcp-logs/bing-cn-mcp-$(date +%Y-%m-%d).log"
+        "mkdir -p ~/.mcp-logs && npx bing-cn-mcp-enhanced 2>> ~/.mcp-logs/bing-cn-mcp-enhanced-$(date +%Y-%m-%d).log"
       ]
     }
   }
@@ -153,7 +153,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
       "command": "cmd",
       "args": [
         "/c",
-        "npx bing-cn-mcp 2>> %USERPROFILE%\\.mcp-logs\\bing-cn-mcp.log"
+        "npx bing-cn-mcp-enhanced 2>> %USERPROFILE%\\.mcp-logs\\bing-cn-mcp-enhanced.log"
       ]
     }
   }
@@ -169,7 +169,7 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
       "command": "powershell",
       "args": [
         "-Command",
-        "$logDir = Join-Path $env:USERPROFILE '.mcp-logs'; if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }; $logFile = Join-Path $logDir 'bing-cn-mcp.log'; npx bing-cn-mcp 2>&1 | Tee-Object -FilePath $logFile -Append"
+        "$logDir = Join-Path $env:USERPROFILE '.mcp-logs'; if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }; $logFile = Join-Path $logDir 'bing-cn-mcp-enhanced.log'; npx bing-cn-mcp-enhanced 2>&1 | Tee-Object -FilePath $logFile -Append"
       ]
     }
   }
@@ -178,17 +178,17 @@ MCP 服务器的日志输出到 stderr。如果你想将日志保存到文件以
 
 #### 查看日志文件
 
-- **macOS/Linux**: `~/.mcp-logs/bing-cn-mcp.log` 或 `~/.mcp-logs/bing-cn-mcp-YYYY-MM-DD.log`
-- **Windows**: `%USERPROFILE%\.mcp-logs\bing-cn-mcp.log`
+- **macOS/Linux**: `~/.mcp-logs/bing-cn-mcp-enhanced.log` 或 `~/.mcp-logs/bing-cn-mcp-enhanced-YYYY-MM-DD.log`
+- **Windows**: `%USERPROFILE%\.mcp-logs\bing-cn-mcp-enhanced.log`
 
 你可以使用以下命令实时查看日志：
 
 ```bash
 # macOS/Linux
-tail -f ~/.mcp-logs/bing-cn-mcp.log
+tail -f ~/.mcp-logs/bing-cn-mcp-enhanced.log
 
 # Windows (PowerShell)
-Get-Content %USERPROFILE%\.mcp-logs\bing-cn-mcp.log -Wait -Tail 50
+Get-Content %USERPROFILE%\.mcp-logs\bing-cn-mcp-enhanced.log -Wait -Tail 50
 ```
 
 ## 支持的工具

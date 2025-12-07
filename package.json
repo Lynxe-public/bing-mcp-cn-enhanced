@@ -1,11 +1,11 @@
 {
-  "name": "bing-cn-mcp",
+  "name": "bing-cn-mcp-enhanced",
   "version": "2.0.0",
   "description": "MCP 服务器，提供中文必应搜索结果抓取和网页内容抓取功能，支持中文搜索",
   "main": "build/index.js",
   "type": "module",
   "bin": {
-    "bing-cn-mcp": "./build/index.js"
+    "bing-cn-mcp-enhanced": "./build/index.js"
   },
   "scripts": {
     "build": "npx tsc",
