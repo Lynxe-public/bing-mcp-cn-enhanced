@@ -1,0 +1,52 @@
+{
+  "name": "bing-cn-mcp",
+  "version": "1.0.1",
+  "description": "MCP 服务器，提供中文必应搜索结果抓取和网页内容抓取功能，支持中文搜索",
+  "main": "build/index.js",
+  "type": "module",
+  "bin": {
+    "bing-cn-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "build": "npx tsc",
+    "start": "node build/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "bing",
+    "search",
+    "scraper",
+    "chinese",
+    "claude",
+    "cursor"
+  ],
+  "author": "Lynxe",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "axios": "^1.6.5",
+    "cheerio": "^1.0.0-rc.12",
+    "dotenv": "^16.3.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.16",
+    "typescript": "^5.3.3"
+  },
+  "files": [
+    "build",
+    ".env.example"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Lynxe-public/bing-mcp-cn-enhanced.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Lynxe-public/bing-mcp-cn-enhanced/issues"
+  },
+  "homepage": "https://github.com/Lynxe-public/bing-mcp-cn-enhanced#readme",
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
