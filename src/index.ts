@@ -21,8 +21,57 @@ interface SearchResult {
   snippet: string;
 }
 
-// 全局变量存储搜索结果，这样可以通过ID引用
-const searchResults = new Map<string, SearchResult>();
+// Global variable to store search results, accessible by ID
+interface SearchResultWithTimestamp extends SearchResult {
+  timestamp: number; // When the result was created
+}
+
+const searchResults = new Map<string, SearchResultWithTimestamp>();
+
+// Counter for generating unique IDs
+let resultIdCounter = 0;
+
+// Maximum number of results to keep in memory
+const MAX_RESULTS = 1000;
+
+// Result expiration time (1 hour in milliseconds)
+const RESULT_EXPIRATION_MS = 60 * 60 * 1000;
+
+/**
+ * Clean up expired and old results from the Map
+ */
+function cleanupResults(): void {
+  const now = Date.now();
+  const entries = Array.from(searchResults.entries());
+  
+  // Remove expired results (older than 1 hour)
+  for (const [id, result] of entries) {
+    if (now - result.timestamp > RESULT_EXPIRATION_MS) {
+      searchResults.delete(id);
+    }
+  }
+  
+  // If still too many results, remove oldest ones
+  if (searchResults.size > MAX_RESULTS) {
+    const sortedEntries = Array.from(searchResults.entries())
+      .sort((a, b) => a[1].timestamp - b[1].timestamp);
+    
+    const toRemove = sortedEntries.slice(0, searchResults.size - MAX_RESULTS);
+    for (const [id] of toRemove) {
+      searchResults.delete(id);
+    }
+  }
+}
+
+/**
+ * Generate a unique result ID
+ */
+function generateResultId(prefix: string = 'result'): string {
+  resultIdCounter++;
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 9);
+  return `${prefix}_${timestamp}_${resultIdCounter}_${random}`;
+}
 
 /**
  * 必应搜索函数
@@ -273,8 +322,8 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
           return;
         }
         
-        // 创建唯一ID
-        const id = `result_${Date.now()}_${index}`;
+        // Generate unique ID
+        const id = generateResultId('result');
         
         // Debug output
         console.error(`Found result ${index}: title="${title.substring(0, 50)}", link="${link.substring(0, 50)}..."`);
@@ -286,9 +335,20 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
           return;
         }
         
-        // Save to result map
-        const result: SearchResult = { id, title, link, snippet };
+        // Save to result map with timestamp
+        const result: SearchResultWithTimestamp = { 
+          id, 
+          title, 
+          link, 
+          snippet,
+          timestamp: Date.now()
+        };
         searchResults.set(id, result);
+        
+        // Clean up old results periodically
+        if (searchResults.size % 50 === 0) {
+          cleanupResults();
+        }
         
         results.push(result);
       });
@@ -346,10 +406,16 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
           snippet = `Result from ${new URL(fullLink).hostname}`;
         }
         
-        const id = `result_${Date.now()}_link_${index}`;
+        const id = generateResultId('result_link');
         console.error(`Extracted potential result link: ${title.substring(0, 50)} - ${fullLink.substring(0, 50)}`);
         
-        const result: SearchResult = { id, title: title.substring(0, 200), link: fullLink, snippet: snippet.substring(0, 300) };
+        const result: SearchResultWithTimestamp = { 
+          id, 
+          title: title.substring(0, 200), 
+          link: fullLink, 
+          snippet: snippet.substring(0, 300),
+          timestamp: Date.now()
+        };
         searchResults.set(id, result);
         results.push(result);
       });
@@ -359,12 +425,13 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
     if (results.length === 0) {
       console.error('No results found, adding original search link as result');
       
-      const id = `result_${Date.now()}_fallback`;
-      const result: SearchResult = {
+      const id = generateResultId('result_fallback');
+      const result: SearchResultWithTimestamp = {
         id,
         title: `Search Results: ${query}`,
         link: searchUrl,
-        snippet: `Unable to parse search results for "${query}", but you can visit the Bing search page directly.`
+        snippet: `Unable to parse search results for "${query}", but you can visit the Bing search page directly.`,
+        timestamp: Date.now()
       };
       
       searchResults.set(id, result);
@@ -381,12 +448,13 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
     }
     
     // 出错时返回一个错误信息作为结果
-    const id = `error_${Date.now()}`;
-    const errorResult: SearchResult = {
+    const id = generateResultId('error');
+    const errorResult: SearchResultWithTimestamp = {
       id,
       title: `搜索 "${query}" 时出错`,
       link: `https://cn.bing.com/search?q=${encodeURIComponent(query)}`,
-      snippet: `搜索过程中发生错误: ${error instanceof Error ? error.message : '未知错误'}`
+      snippet: `搜索过程中发生错误: ${error instanceof Error ? error.message : '未知错误'}`,
+      timestamp: Date.now()
     };
     
     searchResults.set(id, errorResult);
@@ -401,7 +469,10 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
  */
 async function fetchWebpageContent(resultId: string): Promise<string> {
   try {
-    // 从搜索结果映射中获取URL
+    // Clean up old results before fetching
+    cleanupResults();
+    
+    // Get URL from search results map
     const result = searchResults.get(resultId);
     if (!result) {
       throw new Error(`找不到ID为 ${resultId} 的搜索结果`);
@@ -443,7 +514,7 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
     const response = await axios.get(url, { 
       headers,
       timeout: 20000,
-      responseType: 'arraybuffer', // Use arraybuffer to handle various encodings
+      responseType: 'text', // Use text to let axios handle encoding automatically
       maxRedirects: 5,
       validateStatus: (status) => status < 500 // Don't throw on 4xx errors, we'll handle them
     });
@@ -459,30 +530,10 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
       throw new Error(`获取网页内容失败: HTTP ${response.status} 错误. URL: ${url}`);
     }
     
-    // 检测编码并正确解码内容
-    let html = '';
-    const contentType = response.headers['content-type'] || '';
-    let encoding = 'utf-8';
+    // Get HTML content directly (axios handles encoding automatically)
+    const html = response.data;
     
-    // 从Content-Type头部尝试获取字符集
-    const charsetMatch = contentType.match(/charset=([^;]+)/i);
-    if (charsetMatch && charsetMatch[1]) {
-      encoding = charsetMatch[1].trim();
-      console.error(`从Content-Type检测到编码: ${encoding}`);
-    }
-    
-    try {
-      // 尝试使用检测到的编码解码
-      const decoder = new TextDecoder(encoding);
-      html = decoder.decode(response.data);
-    } catch (decodeError) {
-      console.error(`使用 ${encoding} 解码失败，回退到UTF-8: ${decodeError}`);
-      // 如果解码失败，回退到UTF-8
-      const decoder = new TextDecoder('utf-8');
-      html = decoder.decode(response.data);
-    }
-    
-    // 使用 Cheerio 解析 HTML
+    // Use Cheerio to parse HTML
     const $ = cheerio.load(html);
     
     // 移除不需要的元素
@@ -649,9 +700,15 @@ server.tool(
   }
 );
 
-// 运行服务器
+// Run server
 async function main() {
   try {
+    // Set up periodic cleanup (every 30 minutes)
+    setInterval(() => {
+      cleanupResults();
+      console.error(`Cleaned up results. Current Map size: ${searchResults.size}`);
+    }, 30 * 60 * 1000);
+    
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error("必应搜索 MCP 服务器已启动");
