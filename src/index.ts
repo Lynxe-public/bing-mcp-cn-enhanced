@@ -6,25 +6,109 @@ import { z } from "zod";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import dotenv from "dotenv";
+// Playwright is imported but not used yet - will be used for future browser automation
+import { chromium, Browser, BrowserContext, Page } from "playwright";
+import { execSync } from "child_process";
+import { extractBingSearchResults, SearchResult, SearchResultWithTimestamp } from "./bingParser.js";
 
-// 加载环境变量
+// Check if Chromium browser is installed, install if not
+let browserInstalled = false;
+async function ensureBrowserInstalled(): Promise<void> {
+  if (browserInstalled) return;
+  
+  try {
+    // Try to launch browser to check if it's installed
+    const browser = await chromium.launch({ headless: true });
+    await browser.close();
+    browserInstalled = true;
+    console.error('Playwright Chromium browser is ready');
+  } catch (error) {
+    console.error('⚠️ Playwright Chromium browser not found. Attempting to install...');
+    console.error('This may take a few minutes. Please wait...');
+    
+    // Try to install automatically
+    try {
+      execSync('npx playwright install chromium', { stdio: 'inherit' });
+      browserInstalled = true;
+      console.error('✅ Chromium browser installed successfully');
+    } catch (installError) {
+      console.error('❌ Failed to install Chromium automatically');
+      console.error('Please manually run: npx playwright install chromium');
+      throw new Error('Playwright Chromium browser is not installed. Please run: npx playwright install chromium');
+    }
+  }
+}
+
+// Load environment variables
 dotenv.config();
 
-// 配置默认用户代理
-const USER_AGENT = process.env.USER_AGENT || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+// Default user agent - matches Mac Chrome to avoid headless detection
+const USER_AGENT = process.env.USER_AGENT || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-// 定义搜索结果类型
-interface SearchResult {
-  id: string;
-  title: string;
-  link: string;
-  snippet: string;
+/**
+ * Generate a random MUID (Microsoft User ID) for cookies
+ * @returns {string} Random MUID string
+ */
+function generateMUID(): string {
+  const part1 = Math.random().toString(36).substring(2, 15);
+  const part2 = Math.random().toString(36).substring(2, 15);
+  return part1 + part2;
+}
+
+/**
+ * Generate realistic browser headers to avoid detection
+ * @param {string} referer - Referer URL
+ * @param {boolean} isSearch - Whether this is a search request
+ * @returns {Record<string, string>} Headers object
+ */
+function generateBrowserHeaders(referer?: string, isSearch: boolean = false): Record<string, string> {
+  // Randomize Accept-Language slightly to avoid exact pattern matching
+  const languageVariants = [
+    'zh-CN,zh;q=0.9,en;q=0.8',
+    'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    'zh-CN,zh;q=0.9',
+  ];
+  const acceptLanguage = languageVariants[Math.floor(Math.random() * languageVariants.length)];
+
+  const headers: Record<string, string> = {
+    'User-Agent': USER_AGENT,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': acceptLanguage,
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Cache-Control': isSearch ? 'no-cache' : 'max-age=0',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': referer && referer.includes('bing.com') ? 'same-origin' : (referer ? 'cross-site' : 'none'),
+    'Sec-Fetch-User': '?1',
+    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"macOS"',
+    'DNT': '1',
+  };
+
+  // Add Pragma only for search requests
+  if (isSearch) {
+    headers['Pragma'] = 'no-cache';
+  }
+
+  // Add Referer if provided
+  if (referer) {
+    headers['Referer'] = referer;
+  }
+
+  // Add cookies for Bing search with randomized MUID
+  if (isSearch) {
+    const muid = generateMUID();
+    headers['Cookie'] = `SRCHHPGUSR=SRCHLANG=zh-Hans; _EDGE_S=ui=zh-cn; _EDGE_V=1; MUID=${muid}`;
+  }
+
+  return headers;
 }
 
 // Global variable to store search results, accessible by ID
-interface SearchResultWithTimestamp extends SearchResult {
-  timestamp: number; // When the result was created
-}
+// SearchResult and SearchResultWithTimestamp types are imported from bingParser.ts
 
 const searchResults = new Map<string, SearchResultWithTimestamp>();
 
@@ -73,372 +157,646 @@ function generateResultId(prefix: string = 'result'): string {
   return `${prefix}_${timestamp}_${resultIdCounter}_${random}`;
 }
 
+
 /**
- * 必应搜索函数
+ * Parse Bing search results from HTML content (with fallback handling)
+ * @param {string} htmlContent - HTML content from Bing search page
+ * @param {string} query - Search query string
+ * @param {string} searchUrl - Original search URL
+ * @param {number} numResults - Maximum number of results to return
+ * @returns {Array<SearchResult>} Array of parsed search results
+ */
+function parseBingSearchResults(htmlContent: string, query: string, searchUrl: string, numResults: number): SearchResult[] {
+  // Extract results from HTML using the parser module
+  const results = extractBingSearchResults(
+    htmlContent,
+    numResults,
+    generateResultId,
+    (result) => {
+      searchResults.set(result.id, result);
+    },
+    cleanupResults
+  );
+  
+  // If still no results found, add a generic result
+  if (results.length === 0) {
+    console.error('No results found, adding original search link as result');
+    
+    const id = generateResultId('result_fallback');
+    const result: SearchResultWithTimestamp = {
+      id,
+      title: `Search Results: ${query}`,
+      link: searchUrl,
+      snippet: `Unable to parse search results for "${query}", but you can visit the Bing search page directly.`,
+      timestamp: Date.now()
+    };
+    
+    searchResults.set(id, result);
+    results.push(result);
+  }
+  
+  return results;
+}
+
+/**
+ * Launch browser with anti-detection settings (shared method)
+ * @returns {Promise<Browser>} Launched browser instance
+ */
+async function launchBrowserWithAntiDetection(): Promise<Browser> {
+  // Ensure browser is installed before launching
+  await ensureBrowserInstalled();
+  
+  console.error('Launching Chromium browser...');
+  try {
+    const browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+        '--disable-web-security',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-site-isolation-trials',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+      ],
+    });
+    console.error('✅ Browser launched successfully');
+    return browser;
+  } catch (error) {
+    console.error('❌ Failed to launch browser:', error);
+    throw new Error(`Failed to launch browser: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+/**
+ * Create browser context with realistic settings (shared method)
+ * @param {Browser} browser - Browser instance
+ * @returns {Promise<BrowserContext>} Browser context
+ */
+async function createBrowserContext(browser: Browser): Promise<BrowserContext> {
+  console.error('Creating browser context...');
+  try {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      locale: 'zh-CN',
+      viewport: { width: 1920, height: 1080 },
+    });
+    console.error('✅ Browser context created successfully');
+    return context;
+  } catch (error) {
+    console.error('❌ Failed to create browser context:', error);
+    throw new Error(`Failed to create browser context: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+    }
+    
+/**
+ * Create and setup page with anti-detection (shared method)
+ * @param {BrowserContext} context - Browser context
+ * @returns {Promise<Page>} Configured page
+ */
+async function createPageWithAntiDetection(context: BrowserContext): Promise<Page> {
+  console.error('Creating new page...');
+  let page: Page;
+  try {
+    page = await context.newPage();
+    console.error('✅ New page created successfully');
+  } catch (error) {
+    console.error('❌ Failed to create new page:', error);
+    throw new Error(`Failed to create new page: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+
+  // Setup anti-detection measures
+  await setupAntiDetection(page);
+  
+  return page;
+}
+
+/**
+ * Extract text content from HTML using Cheerio (shared method)
+ * @param {string} html - HTML content
+ * @returns {string} Extracted text content
+ */
+function extractTextContentFromHTML(html: string): string {
+    // Use Cheerio to parse HTML
+  const $ = cheerio.load(html);
+    
+  // Remove unwanted elements
+  $('script, style, iframe, noscript, nav, header, footer, .header, .footer, .nav, .sidebar, .ad, .advertisement, #header, #footer, #nav, #sidebar').remove();
+  
+  // Try to find main content area
+  let content = '';
+  const mainSelectors = [
+    'main', 'article', '.article', '.post', '.content', '#content', 
+    '.main', '#main', '.body', '#body', '.entry', '.entry-content',
+    '.post-content', '.article-content', '.text', '.detail'
+  ];
+  
+  for (const selector of mainSelectors) {
+    const mainElement = $(selector);
+    if (mainElement.length > 0) {
+      content = mainElement.text().trim();
+      console.error(`使用选择器 "${selector}" 找到内容，长度: ${content.length} 字符`);
+      break;
+    }
+  }
+  
+  // If no main content found, try extracting paragraphs
+  if (!content || content.length < 100) {
+    console.error('未找到主要内容区域，尝试提取所有段落');
+    const paragraphs: string[] = [];
+    $('p').each((_: number, element: any) => {
+      const text = $(element).text().trim();
+      if (text.length > 20) {
+        paragraphs.push(text);
+      }
+    });
+    
+    if (paragraphs.length > 0) {
+      content = paragraphs.join('\n\n');
+      console.error(`从段落中提取到内容，长度: ${content.length} 字符`);
+    }
+  }
+  
+  // If still no content, get body content
+  if (!content || content.length < 100) {
+    console.error('从段落中未找到足够内容，获取body内容');
+    content = $('body').text().trim();
+  }
+  
+  // Clean text
+  content = content
+    .replace(/\s+/g, ' ')
+    .replace(/\n+/g, '\n')
+    .trim();
+  
+  // Add title
+  const title = $('title').text().trim();
+  if (title) {
+    content = `标题: ${title}\n\n${content}`;
+  }
+  
+  // Limit content length
+  const maxLength = 8000;
+  if (content.length > maxLength) {
+    content = content.substring(0, maxLength) + '... (内容已截断)';
+  }
+  
+  console.error(`最终提取内容长度: ${content.length} 字符`);
+  return content;
+}
+
+/**
+ * Setup Playwright page with comprehensive anti-detection measures
+ * Based on puppeteer-extra-plugin-stealth techniques
+ * @param {Page} page - Playwright page object
+ */
+async function setupAntiDetection(page: Page): Promise<void> {
+  // Comprehensive anti-detection script (all in one to ensure proper execution order)
+  await page.addInitScript(() => {
+    // 1. Remove webdriver property completely
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => false,
+    });
+    
+    // Also delete from prototype chain
+    delete (navigator as any).__proto__.webdriver;
+        
+    // 2. Override userAgent
+    Object.defineProperty(navigator, 'userAgent', {
+      get: () =>
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    });
+        
+    // 3. Setup platform
+    Object.defineProperty(navigator, 'platform', {
+      get: () => 'MacIntel',
+    });
+
+    // 4. Setup languages
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+    });
+
+    // 5. Setup hardwareConcurrency (CPU cores)
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+      get: () => 8,
+    });
+
+    // 6. Setup deviceMemory (if available)
+    if (!(navigator as any).deviceMemory) {
+      Object.defineProperty(navigator, 'deviceMemory', {
+        get: () => 8,
+      });
+        }
+        
+    // 7. Setup plugins with realistic structure
+    const createPlugin = (name: string, filename: string, description: string, mimeTypes: any[]) => {
+      const plugin = {
+        name,
+        filename,
+        description,
+        length: mimeTypes.length,
+      };
+      mimeTypes.forEach((mimeType, index) => {
+        (plugin as any)[index] = mimeType;
+      });
+      return plugin;
+    };
+
+    const createMimeType = (type: string, suffixes: string, description: string) => {
+      return {
+        type,
+        suffixes,
+        description,
+        enabledPlugin: {},
+      };
+    };
+
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        return [
+          createPlugin(
+            'Chrome PDF Plugin',
+            'internal-pdf-viewer',
+            'Portable Document Format',
+            [createMimeType('application/x-google-chrome-pdf', 'pdf', 'Portable Document Format')]
+          ),
+          createPlugin(
+            'Chrome PDF Viewer',
+            'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+            '',
+            [createMimeType('application/pdf', 'pdf', '')]
+          ),
+          createPlugin(
+            'Native Client',
+            'internal-nacl-plugin',
+            '',
+            [
+              createMimeType('application/x-nacl', '', 'Native Client Executable'),
+              createMimeType('application/x-pnacl', '', 'Portable Native Client Executable'),
+            ]
+          ),
+        ];
+      },
+    });
+
+    // 8. Setup mimeTypes
+    Object.defineProperty(navigator, 'mimeTypes', {
+      get: () => {
+        const mimeTypes: any[] = [];
+        const plugins = navigator.plugins as any;
+        for (let i = 0; i < plugins.length; i++) {
+          const plugin = plugins[i];
+          for (let j = 0; j < plugin.length; j++) {
+            mimeTypes.push(plugin[j]);
+          }
+        }
+        return mimeTypes;
+      },
+    });
+
+    // 9. Setup window.chrome object with comprehensive properties
+    (window as any).chrome = {
+      app: {
+        InstallState: 'hehe',
+        RunningState: 'haha',
+        getDetails: 'xixi',
+        getIsInstalled: 'ohno',
+      },
+      csi: function () {
+        return {
+          startE: Date.now(),
+          onloadT: Date.now(),
+          pageT: Date.now() - performance.timing.navigationStart,
+          tran: 15,
+        };
+      },
+      loadTimes: function () {
+        return {
+          commitLoadTime: performance.timing.domContentLoadedEventStart / 1000,
+          connectionInfo: 'http/1.1',
+          finishDocumentLoadTime: performance.timing.domContentLoadedEventEnd / 1000,
+          finishLoadTime: performance.timing.loadEventEnd / 1000,
+          firstPaintAfterLoadTime: 0,
+          firstPaintTime: performance.timing.responseStart / 1000,
+          navigationType: 'Other',
+          npnNegotiatedProtocol: 'unknown',
+          requestTime: performance.timing.navigationStart / 1000,
+          startLoadTime: performance.timing.navigationStart / 1000,
+          wasAlternateProtocolAvailable: false,
+          wasFetchedViaSpdy: false,
+          wasNpnNegotiated: false,
+        };
+      },
+      runtime: {
+        connect: function () {
+          return {
+            onConnect: { addListener: function () {} },
+            onMessage: { addListener: function () {} },
+            postMessage: function () {},
+            disconnect: function () {},
+          };
+        },
+        sendMessage: function () {
+          return Promise.resolve({});
+        },
+        onConnect: { addListener: function () {} },
+        onMessage: { addListener: function () {} },
+      },
+    };
+
+    // 10. Setup permissions API
+    const originalQuery = (window.navigator.permissions as any).query;
+    (window.navigator.permissions as any).query = (parameters: any) => {
+      if (parameters.name === 'notifications') {
+        return Promise.resolve({ state: Notification.permission });
+      }
+      return originalQuery ? originalQuery(parameters) : Promise.resolve({ state: 'granted' });
+    };
+
+    // 11. Setup WebGL vendor and renderer
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (parameter: number) {
+      // UNMASKED_VENDOR_WEBGL (0x9245)
+      if (parameter === 37445) {
+        return 'Intel Inc.';
+      }
+      // UNMASKED_RENDERER_WEBGL (0x9246)
+      if (parameter === 37446) {
+        return 'Intel(R) Iris(TM) Graphics 6100';
+      }
+      return getParameter.call(this, parameter);
+    };
+        
+    // Also for WebGL2
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+      const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+      WebGL2RenderingContext.prototype.getParameter = function (parameter: number) {
+        if (parameter === 37445) {
+          return 'Intel Inc.';
+        }
+        if (parameter === 37446) {
+          return 'Intel(R) Iris(TM) Graphics 6100';
+        }
+        return getParameter2.call(this, parameter);
+      };
+        }
+        
+    // 12. Setup window.outerWidth and window.outerHeight (match viewport)
+    const viewportWidth = window.innerWidth || 1920;
+    const viewportHeight = window.innerHeight || 1080;
+    Object.defineProperty(window, 'outerWidth', {
+      get: () => viewportWidth,
+    });
+    Object.defineProperty(window, 'outerHeight', {
+      get: () => viewportHeight,
+    });
+
+    // 13. Remove automation indicators from toString
+    const originalToString = Function.prototype.toString;
+    Function.prototype.toString = function () {
+      if (this === navigator.permissions.query || this === WebGLRenderingContext.prototype.getParameter) {
+        return 'function () { [native code] }';
+      }
+      return originalToString.call(this);
+    };
+
+    // 14. Setup connection (if available)
+    if (!(navigator as any).connection) {
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({
+          effectiveType: '4g',
+          rtt: 50,
+          downlink: 10,
+          saveData: false,
+        }),
+      });
+        }
+        
+    // 15. Override toString to hide automation
+    const originalNavigatorToString = navigator.toString;
+    navigator.toString = function () {
+      return '[object Navigator]';
+    };
+  });
+}
+
+/**
+ * Search Bing using Playwright browser automation
+ * @param {string} query - Search query string
+ * @param {number} numResults - Maximum number of results to return
+ * @returns {Promise<Array<SearchResult>>} Array of search results
+ */
+export async function searchBingWithBrowser(query: string, numResults: number): Promise<SearchResult[]> {
+  let browser: Browser | null = null;
+  try {
+    console.error(`Starting browser search for: ${query}`);
+    
+    // Use shared methods to launch browser and create page
+    browser = await launchBrowserWithAntiDetection();
+    const context = await createBrowserContext(browser);
+    const page = await createPageWithAntiDetection(context);
+
+    // First, open about:blank to test if browser works
+    console.error('Testing browser by opening about:blank...');
+    try {
+      await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 10000 });
+      console.error('✅ Browser opened successfully');
+      await page.waitForTimeout(1000); // Wait 1 second
+    } catch (error) {
+      console.error('❌ Failed to open about:blank:', error);
+      throw new Error(`Browser failed to open: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+        
+    // Navigate to Bing homepage
+    console.error('Navigating to www.bing.com/?mkt=zh-CN...');
+    try {
+      // Use 'load' instead of 'networkidle' - waits for page load event, not network idle
+      // This is faster and more reliable for modern web pages
+      await page.goto('https://www.bing.com/?mkt=zh-CN', { waitUntil: 'load', timeout: 30000 });
+      console.error('✅ Successfully navigated to Bing');
+      // Wait a bit for any dynamic content to load
+      await page.waitForTimeout(1000);
+    } catch (error) {
+      console.error('❌ Failed to navigate to Bing:', error);
+      throw new Error(`Failed to navigate to Bing: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+    
+    // Random delay to simulate human behavior (500-1500ms)
+    await page.waitForTimeout(Math.random() * 1000 + 500);
+
+    // Find search input box (common selectors for Bing search)
+    const searchInputSelectors = [
+      'input[name="q"]',
+      'input[type="search"]',
+      '#sb_form_q',
+      'input#sb_form_q',
+      '.b_searchboxForm input',
+    ];
+
+    let searchInput = null;
+    for (const selector of searchInputSelectors) {
+          try {
+        searchInput = await page.$(selector);
+        if (searchInput) {
+          console.error(`Found search input with selector: ${selector}`);
+          break;
+        }
+          } catch (e) {
+        // Continue to next selector
+      }
+    }
+
+    if (!searchInput) {
+      throw new Error('Could not find Bing search input box');
+        }
+        
+    // Click on search input to focus
+    await searchInput.click();
+    await page.waitForTimeout(Math.random() * 300 + 200); // 200-500ms delay
+
+    // Type search query character by character to simulate human typing
+    console.error(`Typing search query: ${query}`);
+    await searchInput.type(query, { delay: Math.random() * 100 + 50 }); // 50-150ms delay between keystrokes
+    
+    // Random delay before pressing Enter (300-800ms)
+    await page.waitForTimeout(Math.random() * 500 + 300);
+
+    // Press Enter to search
+    console.error('Pressing Enter to search...');
+    await page.keyboard.press('Enter');
+
+    // Wait for search results to load
+    console.error('Waiting for search results...');
+    await page.waitForSelector('#b_results, .b_algo, #b_content', { timeout: 15000 });
+        
+    // Additional wait for content to fully load
+    await page.waitForTimeout(1000 + Math.random() * 500);
+
+    // Get page HTML content
+    const htmlContent = await page.content();
+    console.error(`Retrieved HTML content, length: ${htmlContent.length} bytes`);
+
+    // Check if blocked by anti-bot
+    const htmlContentLower = htmlContent.toLowerCase();
+    const botDetectionKeywords = [
+      'captcha',
+      'verification',
+      'verify you are human',
+      'access denied',
+      'blocked',
+      'rate limit',
+      'too many requests',
+      '请验证',
+      '验证码',
+      '人机验证'
+    ];
+      
+    // Check for bot detection keywords and log them, but don't throw error
+    const detectedKeywords = botDetectionKeywords.filter(keyword => htmlContentLower.includes(keyword));
+    if (detectedKeywords.length > 0) {
+      console.error(`⚠️ Warning: Possible bot detection keywords detected: ${detectedKeywords.join(', ')}`);
+    }
+    
+    // Check if response contains search results structure
+    if (!htmlContentLower.includes('b_results') && !htmlContentLower.includes('b_algo')) {
+      console.error('⚠️ Warning: Response does not contain expected search result structure');
+      throw new Error('Bing返回的页面不包含预期的搜索结果结构，可能是错误页面或被阻止。');
+    }
+
+    // Get current URL after search
+    const searchUrl = page.url();
+    console.error(`Search completed, URL: ${searchUrl}`);
+
+    // Parse search results from HTML
+    const results = parseBingSearchResults(htmlContent, query, searchUrl, numResults);
+    
+    return results;
+  } catch (error) {
+    console.error('Browser search error:', error);
+    throw error;
+  } finally {
+    // Close browser
+    if (browser) {
+      await browser.close();
+      console.error('Browser closed');
+    }
+  }
+}
+
+/**
+ * 必应搜索函数 (using axios)
  * @param {string} query - 搜索关键词
  * @param {number} numResults - 返回结果数量
  * @returns {Promise<Array<SearchResult>>} 搜索结果数组
  */
-async function searchBing(query: string, numResults: number): Promise<SearchResult[]> {
+export async function searchBing(query: string, numResults: number): Promise<SearchResult[]> {
   try {
-    // 构建必应搜索URL，添加中文支持参数
+    // Build Bing search URL with Chinese support parameters
     const searchUrl = `https://cn.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-CN&ensearch=0`;
     console.error(`正在搜索URL: ${searchUrl}`);
     
-    // 设置请求头，模拟浏览器
-    const headers = {
-      'User-Agent': USER_AGENT,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Upgrade-Insecure-Requests': '1',
-      'Cookie': 'SRCHHPGUSR=SRCHLANG=zh-Hans; _EDGE_S=ui=zh-cn; _EDGE_V=1'
-    };
+    // Generate realistic browser headers
+    const headers = generateBrowserHeaders(undefined, true);
+        
+    // Add random delay to avoid detection (300-1200ms) - more realistic human behavior
+    const delay = Math.random() * 900 + 300;
+    await new Promise(resolve => setTimeout(resolve, delay));
     
-    // 发送请求
+    // Send request
     const response = await axios.get(searchUrl, { 
       headers,
-      timeout: 15000 // 增加超时时间
+      timeout: 15000
     });
-    console.error(`搜索响应状态: ${response.status}`);
+    console.error(`Search response status: ${response.status}`);
     
-    // 调试：保存响应内容到日志
-    console.error(`响应内容长度: ${response.data.length} 字节`);
+    // Debug: Log response content
+    console.error(`Response content length: ${response.data.length} bytes`);
     const snippetSize = 200;
-    console.error(`响应内容前 ${snippetSize} 字符: ${response.data.substring(0, snippetSize)}`);
+    console.error(`Response content first ${snippetSize} chars: ${response.data.substring(0, snippetSize)}`);
     
-    // 使用 Cheerio 解析 HTML
-    const $ = cheerio.load(response.data);
+    // Check if response is valid or blocked by anti-bot
+    const htmlContent = response.data.toLowerCase();
     
-    // 找到搜索结果列表
-    const results: SearchResult[] = [];
-    
-    // Debug: Print the number of search result elements found on the page
-    const totalElements = $('#b_results > li').length;
-    console.error(`Found ${totalElements} search result elements (b_results > li)`);
-    
-    // Check specific elements
-    ['#b_results', '#b_topw', '.b_algo', '.b_ans', '.b_tpcn', '.b_title', '.b_caption', 'h2 a'].forEach(selector => {
-      const count = $(selector).length;
-      console.error(`Selector ${selector} matched ${count} elements`);
-    });
-    
-    // Updated selector list, optimized for Chinese Bing results
-    const resultSelectors = [
-      '#b_results > li.b_algo',
-      '#b_results > li.b_ans',
-      '#b_results > li:not(.b_ad):not(.b_pag):not(.b_msg)',
-      '#b_topw > li.b_algo',
-      '#b_topw > li.b_ans'
+    // Detect common anti-bot responses
+    const botDetectionKeywords = [
+      'captcha',
+      'verification',
+      'verify you are human',
+      'access denied',
+      'blocked',
+      'rate limit',
+      'too many requests',
+      '请验证',
+      '验证码',
+      '人机验证'
     ];
     
-    for (const selector of resultSelectors) {
-      console.error(`尝试选择器: ${selector}`);
-      $(selector).each((index: number, element: any) => {
-        if (results.length >= numResults) return false;
-        
-        // Print element HTML for debugging
-        const elementHtml = $(element).html()?.substring(0, 200);
-        console.error(`Element ${index} HTML snippet: ${elementHtml}`);
-        
-        // Debug: Check what selectors match inside this element
-        console.error(`  - h2 a: ${$(element).find('h2 a').length}`);
-        console.error(`  - .b_tpcn: ${$(element).find('.b_tpcn').length}`);
-        console.error(`  - .tptt: ${$(element).find('.tptt').length}`);
-        console.error(`  - a.tilk: ${$(element).find('a.tilk').length}`);
-        console.error(`  - .b_caption: ${$(element).find('.b_caption').length}`);
-        
-        // Try multiple ways to extract title and link
-        let title = '';
-        let link = '';
-        
-        // Method 1: Look for h2 a (standard result structure)
-        const titleElement = $(element).find('h2 a').first();
-        if (titleElement.length) {
-          title = titleElement.text().trim();
-          link = titleElement.attr('href') || '';
-        }
-        
-        // Method 2: Look for .b_tpcn structure (new Bing layout)
-        if (!title || !link) {
-          const tpcnElement = $(element).find('.b_tpcn').first();
-          if (tpcnElement.length) {
-            // Title is in .tptt inside .tilk
-            const tpttElement = tpcnElement.find('.tptt').first();
-            if (tpttElement.length) {
-              title = tpttElement.text().trim();
-            }
-            // Link is in .tilk - check href, redirecturl, or data-h attribute
-            const tilkElement = tpcnElement.find('a.tilk').first();
-            if (tilkElement.length) {
-              link = tilkElement.attr('href') || 
-                     tilkElement.attr('redirecturl') || 
-                     tilkElement.attr('data-h') || 
-                     link;
-            }
-          }
-        }
-        
-        // Method 3: Try other selectors
-        if (!title || !link) {
-          const altTitleElement = $(element).find('.b_title a, a.tilk, h2 a, a[target="_blank"]').first();
-          if (altTitleElement.length) {
-            if (!title) {
-              // Try to get title from text or from nested elements
-              title = altTitleElement.text().trim() || 
-                      altTitleElement.find('.tptt, strong').first().text().trim() || '';
-            }
-            if (!link) {
-              link = altTitleElement.attr('href') || 
-                     altTitleElement.attr('redirecturl') || 
-                     altTitleElement.attr('data-h') || '';
-            }
-          }
-        }
-        
-        // Method 4: Try to extract from h2 directly if still missing
-        if (!title) {
-          const h2Element = $(element).find('h2').first();
-          if (h2Element.length) {
-            title = h2Element.text().trim();
-            // Try to find link near h2
-            const h2Link = h2Element.find('a').first();
-            if (h2Link.length && !link) {
-              link = h2Link.attr('href') || '';
-            }
-          }
-        }
-        
-        // Extract snippet
-        let snippet = '';
-        // Method 1: Look for .b_caption with p or direct text
-        const captionElement = $(element).find('.b_caption').first();
-        if (captionElement.length) {
-          // Try to get text from p tags first
-          const captionP = captionElement.find('p').first();
-          if (captionP.length) {
-            snippet = captionP.text().trim();
-          } else {
-            // If no p tag, get direct text
-            snippet = captionElement.text().trim();
-          }
-        }
-        
-        // Method 2: Look for .b_snippet or .b_lineclamp2
-        if (!snippet) {
-          const snippetElement = $(element).find('.b_snippet, .b_lineclamp2, .b_lineclamp3').first();
-          if (snippetElement.length) {
-            snippet = snippetElement.text().trim();
-          }
-        }
-        
-        // Method 3: Extract from entire element if still no snippet
-        if (!snippet) {
-          snippet = $(element).text().trim();
-          // Remove title part
-          if (title && snippet.includes(title)) {
-            snippet = snippet.replace(title, '').trim();
-          }
-          // Limit snippet length
-          if (snippet.length > 200) {
-            snippet = snippet.substring(0, 200) + '...';
-          }
-        }
-        
-        // Fix incomplete links
-        if (link && !link.startsWith('http')) {
-          // Handle Bing redirect URLs
-          if (link.startsWith('/newtabredir') || link.startsWith('/ck/a')) {
-            // These are Bing redirect URLs, skip them as they're not direct result links
-            console.error(`Skipping Bing redirect URL: ${link}`);
-            link = '';
-          } else if (link.startsWith('/')) {
-            link = `https://cn.bing.com${link}`;
-          } else if (link.startsWith('//')) {
-            link = `https:${link}`;
-          } else {
-            link = `https://cn.bing.com/${link}`;
-          }
-        }
-        
-        // Clean up link - remove tracking parameters
-        if (link) {
-          try {
-            const url = new URL(link);
-            // Remove common tracking parameters
-            ['utm_source', 'utm_medium', 'utm_campaign', 'ref', 'source'].forEach(param => {
-              url.searchParams.delete(param);
-            });
-            link = url.toString();
-          } catch (e) {
-            // If URL parsing fails, keep original link
-            console.error(`Failed to parse URL: ${link}`);
-          }
-        }
-        
-        // Skip if it's an ad
-        if ($(element).hasClass('b_ad') || $(element).closest('.b_ad').length > 0) {
-          console.error(`Skipping ad element ${index}`);
-          return;
-        }
-        
-        // Skip pagination and message elements
-        if ($(element).hasClass('b_pag') || $(element).hasClass('b_msg')) {
-          console.error(`Skipping pagination/message element ${index}`);
-          return;
-        }
-        
-        // If we have a link but no title, try to extract from link text or use a default
-        if (!title && link) {
-          try {
-            const urlObj = new URL(link);
-            title = `Result from ${urlObj.hostname}`;
-          } catch (e) {
-            // If link is not a valid URL, try to extract from element text
-            const elementText = $(element).text().trim().substring(0, 100);
-            title = elementText || `Search Result ${index + 1}`;
-          }
-        }
-        
-        // If we still don't have a title, try to get it from the element's text
-        if (!title) {
-          const elementText = $(element).find('h2, h3, .b_title, .tptt').first().text().trim();
-          if (elementText) {
-            title = elementText.substring(0, 200);
-          } else {
-            // Last resort: use first 50 chars of element text
-            title = $(element).text().trim().substring(0, 50) || `Result ${index + 1}`;
-          }
-        }
-        
-        // Skip only if we have absolutely nothing useful
-        if (!title && !link && !snippet) {
-          console.error(`Skipping element ${index} - no title, link, or snippet found`);
-          return;
-        }
-        
-        // Generate unique ID
-        const id = generateResultId('result');
-        
-        // Debug output
-        console.error(`Found result ${index}: title="${title.substring(0, 50)}", link="${link.substring(0, 50)}..."`);
-        
-        // Check for duplicates by link
-        const isDuplicate = results.some(r => r.link === link && link);
-        if (isDuplicate) {
-          console.error(`Skipping duplicate result with link: ${link.substring(0, 50)}`);
-          return;
-        }
-        
-        // Save to result map with timestamp
-        const result: SearchResultWithTimestamp = { 
-          id, 
-          title, 
-          link, 
-          snippet,
-          timestamp: Date.now()
-        };
-        searchResults.set(id, result);
-        
-        // Clean up old results periodically
-        if (searchResults.size % 50 === 0) {
-          cleanupResults();
-        }
-        
-        results.push(result);
-      });
-      
-      // Continue trying other selectors if we haven't found enough results yet
-      if (results.length >= numResults) {
-        console.error(`Found enough results (${results.length}), stopping search`);
-        break;
-      } else if (results.length > 0) {
-        console.error(`Using selector ${selector} found ${results.length} results, continuing to try other selectors`);
-      }
+    const isBlocked = botDetectionKeywords.some(keyword => htmlContent.includes(keyword));
+    if (isBlocked) {
+      console.error('⚠️ Warning: Possible bot detection or CAPTCHA page detected');
+      throw new Error('Bing可能检测到自动化请求，返回了验证页面。请稍后重试或检查请求频率。');
     }
     
-    // If still no results found, try extracting from any links that look like search results
-    if (results.length === 0) {
-      console.error('No results found with selectors, trying to extract from links directly');
-      
-      // Try to find links in result-like containers
-      const linkContainers = $('#b_results a[href], #b_topw a[href], .b_algo a[href], .b_ans a[href]');
-      console.error(`Found ${linkContainers.length} potential result links`);
-      
-      linkContainers.each((index: number, element: any) => {
-        if (results.length >= numResults) return false;
-        
-        const $el = $(element);
-        let title = $el.text().trim();
-        let link = $el.attr('href') || $el.attr('redirecturl') || $el.attr('data-h') || '';
-        
-        // Skip navigation links, empty links, or JavaScript links
-        if (!link || link === '#' || link.startsWith('javascript:') || link.includes('/search?')) return;
-        
-        // Ensure link is a complete URL
-        let fullLink = link;
-        if (!link.startsWith('http')) {
-          if (link.startsWith('/')) {
-            fullLink = `https://cn.bing.com${link}`;
-          } else {
-            fullLink = `https://cn.bing.com/${link}`;
-          }
-        }
-        
-        // Skip Bing internal links
-        if (fullLink.includes('bing.com/search') || fullLink.includes('bing.com/ck')) return;
-        
-        // If no title, try to get from parent elements
-        if (!title || title.length < 3) {
-          title = $el.closest('li, .b_algo, .b_ans').find('h2, .tptt, .b_title').first().text().trim() || 
-                  $el.closest('li, .b_algo, .b_ans').find('h2').first().text().trim() || 
-                  `Result ${index + 1}`;
-        }
-        
-        // Get snippet from nearby elements
-        let snippet = $el.closest('li, .b_algo, .b_ans').find('.b_caption, .b_snippet, .b_lineclamp2').first().text().trim();
-        if (!snippet) {
-          snippet = `Result from ${new URL(fullLink).hostname}`;
-        }
-        
-        const id = generateResultId('result_link');
-        console.error(`Extracted potential result link: ${title.substring(0, 50)} - ${fullLink.substring(0, 50)}`);
-        
-        const result: SearchResultWithTimestamp = { 
-          id, 
-          title: title.substring(0, 200), 
-          link: fullLink, 
-          snippet: snippet.substring(0, 300),
-          timestamp: Date.now()
-        };
-        searchResults.set(id, result);
-        results.push(result);
-      });
+    // Check if response contains search results structure
+    if (!htmlContent.includes('b_results') && !htmlContent.includes('b_algo')) {
+      console.error('⚠️ Warning: Response does not contain expected search result structure');
+      // Log more details for debugging
+      console.error(`Response preview: ${response.data.substring(0, 500)}`);
+      throw new Error('Bing返回的页面不包含预期的搜索结果结构，可能是错误页面或被阻止。');
     }
     
-    // If still no results found, add a generic result
-    if (results.length === 0) {
-      console.error('No results found, adding original search link as result');
-      
-      const id = generateResultId('result_fallback');
-      const result: SearchResultWithTimestamp = {
-        id,
-        title: `Search Results: ${query}`,
-        link: searchUrl,
-        snippet: `Unable to parse search results for "${query}", but you can visit the Bing search page directly.`,
-        timestamp: Date.now()
-      };
-      
-      searchResults.set(id, result);
-      results.push(result);
-    }
-    
-    console.error(`Final: returning ${results.length} results`);
+    // Parse Bing search results from HTML
+    const results = parseBingSearchResults(response.data, query, searchUrl, numResults);
     return results;
   } catch (error) {
     console.error('必应搜索出错:', error);
@@ -463,11 +821,12 @@ async function searchBing(query: string, numResults: number): Promise<SearchResu
 }
 
 /**
- * 获取网页内容函数
- * @param {string} resultId - 搜索结果ID
- * @returns {Promise<string>} 网页内容
+ * Fetch webpage content using Playwright browser automation
+ * @param {string} resultId - Search result ID
+ * @returns {Promise<string>} Webpage content
  */
 async function fetchWebpageContent(resultId: string): Promise<string> {
+  let browser: Browser | null = null;
   try {
     // Clean up old results before fetching
     cleanupResults();
@@ -481,154 +840,66 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
     const url = result.link;
     console.error(`正在获取网页内容: ${url}`);
     
-    // Set request headers to mimic a real browser
-    const headers: Record<string, string> = {
-      'User-Agent': USER_AGENT,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Cache-Control': 'max-age=0',
-      'Connection': 'keep-alive',
-      'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Referer': 'https://cn.bing.com/',
-      'DNT': '1'
-    };
+    // Use shared methods to launch browser and create page
+    browser = await launchBrowserWithAntiDetection();
+    const context = await createBrowserContext(browser);
+    const page = await createPageWithAntiDetection(context);
     
-    // Try to extract domain from URL for better Referer
+    // Determine referer for the page
+    let referer = 'https://cn.bing.com/';
     try {
       const urlObj = new URL(url);
-      headers['Referer'] = `${urlObj.protocol}//${urlObj.hostname}/`;
+      // If it's a Bing URL, use same-origin referer
+      if (urlObj.hostname.includes('bing.com')) {
+        referer = `${urlObj.protocol}//${urlObj.hostname}/`;
+      }
     } catch (e) {
       // Keep default Referer if URL parsing fails
     }
     
-    // Send request to fetch webpage content
-    // Add a small random delay to avoid being detected as a bot
-    const delay = Math.random() * 500 + 200; // 200-700ms delay
-    await new Promise(resolve => setTimeout(resolve, delay));
+    // Add random delay to simulate human behavior (500-1500ms)
+    await page.waitForTimeout(Math.random() * 1000 + 500);
     
-    const response = await axios.get(url, { 
-      headers,
-      timeout: 20000,
-      responseType: 'text', // Use text to let axios handle encoding automatically
-      maxRedirects: 5,
-      validateStatus: (status) => status < 500 // Don't throw on 4xx errors, we'll handle them
-    });
-    
-    console.error(`Webpage response status: ${response.status}`);
-    
-    // Handle 403 and other client errors
-    if (response.status === 403) {
-      throw new Error(`获取网页内容失败: 网站拒绝了访问请求 (403 Forbidden). 这可能是因为反爬虫机制。URL: ${url}`);
-    }
-    
-    if (response.status >= 400) {
-      throw new Error(`获取网页内容失败: HTTP ${response.status} 错误. URL: ${url}`);
-    }
-    
-    // Get HTML content directly (axios handles encoding automatically)
-    const html = response.data;
-    
-    // Use Cheerio to parse HTML
-    const $ = cheerio.load(html);
-    
-    // 移除不需要的元素
-    $('script, style, iframe, noscript, nav, header, footer, .header, .footer, .nav, .sidebar, .ad, .advertisement, #header, #footer, #nav, #sidebar').remove();
-    
-    // 获取页面主要内容
-    // 尝试找到主要内容区域
-    let content = '';
-    const mainSelectors = [
-      'main', 'article', '.article', '.post', '.content', '#content', 
-      '.main', '#main', '.body', '#body', '.entry', '.entry-content',
-      '.post-content', '.article-content', '.text', '.detail'
-    ];
-    
-    for (const selector of mainSelectors) {
-      const mainElement = $(selector);
-      if (mainElement.length > 0) {
-        content = mainElement.text().trim();
-        console.error(`使用选择器 "${selector}" 找到内容，长度: ${content.length} 字符`);
-        break;
-      }
-    }
-    
-    // 如果没有找到主要内容区域，则尝试查找所有段落
-    if (!content || content.length < 100) {
-      console.error('未找到主要内容区域，尝试提取所有段落');
-      const paragraphs: string[] = [];
-      $('p').each((_, element) => {
-        const text = $(element).text().trim();
-        if (text.length > 20) { // 只保留有意义的段落
-          paragraphs.push(text);
-        }
+    // Navigate to the webpage
+    console.error(`Navigating to: ${url}`);
+    try {
+      await page.goto(url, { 
+        waitUntil: 'load', 
+        timeout: 30000,
+        referer: referer
       });
-      
-      if (paragraphs.length > 0) {
-        content = paragraphs.join('\n\n');
-        console.error(`从段落中提取到内容，长度: ${content.length} 字符`);
-      }
+      console.error('✅ Successfully navigated to webpage');
+      // Wait a bit for dynamic content to load
+      await page.waitForTimeout(1000 + Math.random() * 500);
+    } catch (error) {
+      console.error('❌ Failed to navigate to webpage:', error);
+      throw new Error(`Failed to navigate to webpage: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
     
-    // 如果仍然没有找到内容，则获取 body 内容
-    if (!content || content.length < 100) {
-      console.error('从段落中未找到足够内容，获取body内容');
-      content = $('body').text().trim();
-    }
+    // Get page HTML content
+    const htmlContent = await page.content();
+    console.error(`Retrieved HTML content, length: ${htmlContent.length} bytes`);
     
-    // 清理文本
-    content = content
-      .replace(/\s+/g, ' ')
-      .replace(/\n+/g, '\n')
-      .trim();
+    // Extract text content from HTML using shared method
+    const content = extractTextContentFromHTML(htmlContent);
     
-    // 添加标题
-    const title = $('title').text().trim();
-    if (title) {
-      content = `标题: ${title}\n\n${content}`;
-    }
-    
-    // 如果内容过长，则截取一部分
-    const maxLength = 8000;
-    if (content.length > maxLength) {
-      content = content.substring(0, maxLength) + '... (内容已截断)';
-    }
-    
-    console.error(`最终提取内容长度: ${content.length} 字符`);
     return content;
   } catch (error) {
     console.error('Error fetching webpage content:', error);
-    if (axios.isAxiosError(error)) {
-      const status = error.response?.status;
-      const statusText = error.response?.statusText;
-      const contentType = error.response?.headers['content-type'] || 'unknown';
-      
-      console.error(`HTTP error status: ${status}`);
-      console.error(`HTTP error status text: ${statusText}`);
-      console.error(`Error response content type: ${contentType}`);
-      
-      if (status === 403) {
-        throw new Error(`获取网页内容失败: 网站拒绝了访问请求 (403 Forbidden). 这可能是因为反爬虫机制。请稍后重试或尝试其他链接。`);
-      } else if (status === 404) {
-        throw new Error(`获取网页内容失败: 页面不存在 (404 Not Found)`);
-      } else if (status === 429) {
-        throw new Error(`获取网页内容失败: 请求过于频繁 (429 Too Many Requests). 请稍后重试。`);
-      } else if (status) {
-        throw new Error(`获取网页内容失败: HTTP ${status} ${statusText || ''}`);
-      }
-    }
     throw new Error(`获取网页内容失败: ${error instanceof Error ? error.message : '未知错误'}`);
+  } finally {
+    // Close browser
+    if (browser) {
+      await browser.close();
+      console.error('Browser closed');
+    }
   }
 }
 
 // Create MCP server instance
 const server = new McpServer({
   name: "bing-search",
-  version: "2.0.0"
+  version: "2.0.7"
 });
 
 // Register Bing search tool
@@ -640,8 +911,8 @@ server.tool(
   },
   async ({ query, num_results }) => {
     try {
-      // 调用必应搜索
-      const results = await searchBing(query, num_results);
+      // Use browser-based search for better anti-detection
+      const results = await searchBingWithBrowser(query, num_results);
       
       return {
         content: [
@@ -701,6 +972,11 @@ server.tool(
 // Run server
 async function main() {
   try {
+    // Pre-check browser installation (non-blocking)
+    ensureBrowserInstalled().catch((error) => {
+      console.error('Browser installation check failed (will retry on first use):', error);
+    });
+    
     // Set up periodic cleanup (every 30 minutes)
     setInterval(() => {
       cleanupResults();
