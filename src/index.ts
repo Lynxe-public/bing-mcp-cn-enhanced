@@ -899,7 +899,7 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
 // Create MCP server instance
 const server = new McpServer({
   name: "bing-search",
-  version: "2.0.8"
+  version: "2.0.9"
 });
 
 // Register Bing search tool
