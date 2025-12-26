@@ -1,6 +1,6 @@
 {
   "name": "bing-cn-mcp-enhanced",
-  "version": "2.0.9",
+  "version": "2.0.10",
   "description": "MCP 服务器，提供中文必应搜索结果抓取和网页内容抓取功能，支持中文搜索",
   "main": "build/index.js",
   "type": "module",
@@ -13,8 +13,7 @@
     "debug": "npm run build && node --inspect build/debug.js",
     "debug:brk": "npm run build && node --inspect-brk build/debug.js",
     "debug:zhihu": "npm run build && node build/debug.js --zhihu",
-    "prepublishOnly": "npm run build",
-    "postinstall": "npx playwright install chromium || true"
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "mcp",
@@ -45,7 +44,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Lynxe-public/bing-mcp-cn-enhanced.git"
+    "url": "git+https://github.com/Lynxe-public/bing-mcp-cn-enhanced.git"
   },
   "bugs": {
     "url": "https://github.com/Lynxe-public/bing-mcp-cn-enhanced/issues"
