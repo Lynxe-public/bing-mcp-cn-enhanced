@@ -11,13 +11,14 @@ import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { execSync } from "child_process";
 import { extractBingSearchResults, SearchResult, SearchResultWithTimestamp } from "./bingParser.js";
 
-// Check if Chromium browser is installed, install if not
 let browserInstalled = false;
+let sharedBrowser: Browser | null = null;
+let browserLaunchPromise: Promise<Browser> | null = null;
+
 async function ensureBrowserInstalled(): Promise<void> {
   if (browserInstalled) return;
   
   try {
-    // Try to launch browser to check if it's installed
     const browser = await chromium.launch({ headless: true });
     await browser.close();
     browserInstalled = true;
@@ -26,7 +27,6 @@ async function ensureBrowserInstalled(): Promise<void> {
     console.error('⚠️ Playwright Chromium browser not found. Attempting to install...');
     console.error('This may take a few minutes. Please wait...');
     
-    // Try to install automatically
     try {
       execSync('npx playwright install chromium', { stdio: 'inherit' });
       browserInstalled = true;
@@ -36,6 +36,38 @@ async function ensureBrowserInstalled(): Promise<void> {
       console.error('Please manually run: npx playwright install chromium');
       throw new Error('Playwright Chromium browser is not installed. Please run: npx playwright install chromium');
     }
+  }
+}
+
+async function getSharedBrowser(): Promise<Browser> {
+  if (sharedBrowser && sharedBrowser.isConnected()) {
+    return sharedBrowser;
+  }
+  if (browserLaunchPromise) {
+    return browserLaunchPromise;
+  }
+  browserLaunchPromise = launchBrowserWithAntiDetection();
+  try {
+    sharedBrowser = await browserLaunchPromise;
+    return sharedBrowser;
+  } catch (error) {
+    browserLaunchPromise = null;
+    throw error;
+  } finally {
+    browserLaunchPromise = null;
+  }
+}
+
+async function closeSharedBrowser(): Promise<void> {
+  if (sharedBrowser) {
+    try {
+      if (sharedBrowser.isConnected()) {
+        await sharedBrowser.close();
+      }
+    } catch (error) {
+      console.error('Error closing shared browser:', error);
+    }
+    sharedBrowser = null;
   }
 }
 
@@ -597,13 +629,12 @@ async function setupAntiDetection(page: Page): Promise<void> {
  * @returns {Promise<Array<SearchResult>>} Array of search results
  */
 export async function searchBingWithBrowser(query: string, numResults: number): Promise<SearchResult[]> {
-  let browser: Browser | null = null;
+  let context: BrowserContext | null = null;
   try {
     console.error(`Starting browser search for: ${query}`);
     
-    // Use shared methods to launch browser and create page
-    browser = await launchBrowserWithAntiDetection();
-    const context = await createBrowserContext(browser);
+    const browser = await getSharedBrowser();
+    context = await createBrowserContext(browser);
     const page = await createPageWithAntiDetection(context);
 
     // First, open about:blank to test if browser works
@@ -723,12 +754,14 @@ export async function searchBingWithBrowser(query: string, numResults: number): 
     return results;
   } catch (error) {
     console.error('Browser search error:', error);
+    if (sharedBrowser && !sharedBrowser.isConnected()) {
+      sharedBrowser = null;
+    }
     throw error;
   } finally {
-    // Close browser
-    if (browser) {
-      await browser.close();
-      console.error('Browser closed');
+    if (context) {
+      await context.close();
+      console.error('Browser context closed');
     }
   }
 }
@@ -826,12 +859,10 @@ export async function searchBing(query: string, numResults: number): Promise<Sea
  * @returns {Promise<string>} Webpage content
  */
 async function fetchWebpageContent(resultId: string): Promise<string> {
-  let browser: Browser | null = null;
+  let context: BrowserContext | null = null;
   try {
-    // Clean up old results before fetching
     cleanupResults();
     
-    // Get URL from search results map
     const result = searchResults.get(resultId);
     if (!result) {
       throw new Error(`找不到ID为 ${resultId} 的搜索结果`);
@@ -840,9 +871,8 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
     const url = result.link;
     console.error(`正在获取网页内容: ${url}`);
     
-    // Use shared methods to launch browser and create page
-    browser = await launchBrowserWithAntiDetection();
-    const context = await createBrowserContext(browser);
+    const browser = await getSharedBrowser();
+    context = await createBrowserContext(browser);
     const page = await createPageWithAntiDetection(context);
     
     // Determine referer for the page
@@ -886,12 +916,14 @@ async function fetchWebpageContent(resultId: string): Promise<string> {
     return content;
   } catch (error) {
     console.error('Error fetching webpage content:', error);
+    if (sharedBrowser && !sharedBrowser.isConnected()) {
+      sharedBrowser = null;
+    }
     throw new Error(`获取网页内容失败: ${error instanceof Error ? error.message : '未知错误'}`);
   } finally {
-    // Close browser
-    if (browser) {
-      await browser.close();
-      console.error('Browser closed');
+    if (context) {
+      await context.close();
+      console.error('Browser context closed');
     }
   }
 }
@@ -903,15 +935,18 @@ const server = new McpServer({
 });
 
 // Register Bing search tool
+const bingSearchParams = {
+  query: z.string().describe("搜索关键词"),
+  num_results: z.number().describe("返回的结果数量，默认为5")
+};
+
 server.tool(
   "bing_search",
-  {
-    query: z.string().describe("搜索关键词"),
-    num_results: z.number().default(5).describe("返回的结果数量，默认为5")
-  },
-  async ({ query, num_results }) => {
+  "搜索关键词",
+  bingSearchParams as Record<string, z.ZodTypeAny>,
+  // @ts-expect-error TS2589: Type instantiation is excessively deep
+  async ({ query, num_results = 5 }: { query: string; num_results?: number }) => {
     try {
-      // Use browser-based search for better anti-detection
       const results = await searchBingWithBrowser(query, num_results);
       
       return {
@@ -969,19 +1004,53 @@ server.tool(
   }
 );
 
-// Run server
+let isShuttingDown = false;
+
+async function gracefulShutdown(reason: string): Promise<void> {
+  if (isShuttingDown) return; // 防止重复触发
+  isShuttingDown = true;
+  console.error(`Shutting down (${reason})...`);
+  try {
+    await closeSharedBrowser();
+  } catch (e) {
+    console.error('Error closing browser during shutdown:', e);
+  }
+  searchResults.clear();
+  process.exit(0);
+}
+
+// 1. 处理直接收到的信号（SIGTERM/SIGINT）
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// 2. 关键修复：监听 stdin EOF
+//    当父进程 (npx) 退出后，stdin pipe 自动关闭，
+//    这是孤儿进程唯一能感知到"父进程已死"的信号。
+//    没有这行，setInterval 会阻止 Node.js event loop 退出，
+//    导致进程永远存活。
+process.stdin.on('end', () => gracefulShutdown('stdin EOF (parent exited)'));
+// 在某些环境中 stdin 可能不会被 resume，主动 resume 确保 'end' 事件能触发
+process.stdin.resume();
+
+// 3. 处理未捕获异常，防止进程挂起
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  gracefulShutdown('uncaughtException');
+});
+
 async function main() {
   try {
-    // Pre-check browser installation (non-blocking)
     ensureBrowserInstalled().catch((error) => {
       console.error('Browser installation check failed (will retry on first use):', error);
     });
     
-    // Set up periodic cleanup (every 30 minutes)
-    setInterval(() => {
+    const cleanupTimer = setInterval(() => {
       cleanupResults();
       console.error(`Cleaned up results. Current Map size: ${searchResults.size}`);
     }, 30 * 60 * 1000);
+    // 让 setInterval 不阻止进程退出（虽然有了 stdin.on('end') 已经能处理，
+    // 但设置 unref 是双重保险：如果 stdin 关闭，timer 也不会阻止退出）
+    cleanupTimer.unref();
     
     const transport = new StdioServerTransport();
     await server.connect(transport);

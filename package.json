@@ -5,7 +5,7 @@
   "main": "build/index.js",
   "type": "module",
   "bin": {
-    "bing-cn-mcp-enhanced": "./build/index.js"
+    "bing-cn-mcp-enhanced": "build/index.js"
   },
   "scripts": {
     "build": "npx tsc",
